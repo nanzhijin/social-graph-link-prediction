@@ -5,3 +5,10 @@ __pycache__/
 .ipynb_checkpoints/
 lib/
 过期可视化图像回收站/
+00_技术验证/
+
+# 测试垃圾图
+figures/_test*.png
+
+# 含API Key的配置文件
+0_方案设计/路径设置.md

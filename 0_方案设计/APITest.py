@@ -4,7 +4,7 @@ import os
 from openai import OpenAI
 
 # 设置API Key（选择一种方式）
-API_KEY = "sk-8ec70a370eb943d5930e6e9003db29a7"  # ⚠️ 注意安全，不要提交到Git
+API_KEY = ""  # ⚠️ 注意安全，不要提交到Git
 
 # 初始化客户端
 client = OpenAI(
