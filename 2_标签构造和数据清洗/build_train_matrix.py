@@ -461,6 +461,175 @@ train_labeled = datasets["train"]
 valid_labeled = datasets["valid"]
 
 
+# ============================================================
+# 4a. 时序进化特征 (Temporal Evolution) — 假设检验方向一
+# ============================================================
+# 把训练期按中位数时间戳切成前半段/后半段，捕捉"分享对象是否在变"
+# 四个特征: inviter_new_voter_ratio, inviter_voter_retention,
+#           pair_is_recent, pair_last_share_rank
+# 所有计算仅使用 train_raw (≤split_date)
+# ============================================================
+print("\n" + "=" * 60)
+print("4a. 时序进化特征 (Temporal Evolution)")
+print("=" * 60)
+
+midpoint = train_raw["timestamp"].median()
+print(f"  训练期中位时间: {midpoint}")
+
+first_half = train_raw[train_raw["timestamp"] <= midpoint]
+second_half = train_raw[train_raw["timestamp"] > midpoint]
+
+# inviter 级: 两段各有哪些 voter
+fh_inv_voters = first_half.groupby("inviter_id")["voter_id"].apply(set).to_dict()
+sh_inv_voters = second_half.groupby("inviter_id")["voter_id"].apply(set).to_dict()
+
+inv_temporal = {}
+all_inv = set(fh_inv_voters.keys()) | set(sh_inv_voters.keys())
+for inv in all_inv:
+    fh_set = fh_inv_voters.get(inv, set())
+    sh_set = sh_inv_voters.get(inv, set())
+    n_sh = len(sh_set)
+    n_fh = len(fh_set)
+    inv_temporal[inv] = {
+        "inviter_new_voter_ratio": len(sh_set - fh_set) / n_sh if n_sh > 0 else 0.0,
+        "inviter_voter_retention": len(fh_set & sh_set) / n_fh if n_fh > 0 else 0.0,
+    }
+
+df_inv_temporal = pd.DataFrame.from_dict(inv_temporal, orient="index")
+df_inv_temporal.index.name = "inviter_id"
+df_inv_temporal = df_inv_temporal.reset_index()
+
+for df_name, df_lbl in [("train", train_labeled), ("valid", valid_labeled)]:
+    df_lbl = df_lbl.merge(df_inv_temporal, on="inviter_id", how="left")
+    df_lbl["inviter_new_voter_ratio"] = df_lbl["inviter_new_voter_ratio"].fillna(0.0)
+    df_lbl["inviter_voter_retention"] = df_lbl["inviter_voter_retention"].fillna(0.0)
+    if df_name == "train":
+        train_labeled = df_lbl
+    else:
+        valid_labeled = df_lbl
+
+# pair 级: pair_is_recent
+sh_pairs = second_half[["inviter_id", "voter_id"]].drop_duplicates()
+sh_pairs["pair_is_recent"] = 1
+
+for df_name, df_lbl in [("train", train_labeled), ("valid", valid_labeled)]:
+    df_lbl = df_lbl.merge(sh_pairs, on=["inviter_id", "voter_id"], how="left")
+    df_lbl["pair_is_recent"] = df_lbl["pair_is_recent"].fillna(0).astype(int)
+    if df_name == "train":
+        train_labeled = df_lbl
+    else:
+        valid_labeled = df_lbl
+
+# pair 级: pair_last_share_rank
+last_share_rank = train_raw.groupby(["inviter_id", "voter_id"])["timestamp"].max().reset_index()
+last_share_rank["pair_last_share_rank"] = last_share_rank.groupby("inviter_id")["timestamp"].rank(
+    ascending=False, method="dense")
+
+for df_name, df_lbl in [("train", train_labeled), ("valid", valid_labeled)]:
+    df_lbl = df_lbl.merge(
+        last_share_rank[["inviter_id", "voter_id", "pair_last_share_rank"]],
+        on=["inviter_id", "voter_id"], how="left")
+    df_lbl["pair_last_share_rank"] = df_lbl["pair_last_share_rank"].fillna(-1)
+    if df_name == "train":
+        train_labeled = df_lbl
+    else:
+        valid_labeled = df_lbl
+
+print(f"  inviter_new_voter_ratio: mean={train_labeled['inviter_new_voter_ratio'].mean():.3f}")
+print(f"  inviter_voter_retention: mean={train_labeled['inviter_voter_retention'].mean():.3f}")
+print(f"  pair_is_recent: mean={train_labeled['pair_is_recent'].mean():.3f}")
+pct_no_rank = (train_labeled['pair_last_share_rank'] == -1).mean() * 100
+print(f"  pair_last_share_rank: mean={train_labeled['pair_last_share_rank'].mean():.1f}  "
+      f"(-1占比={pct_no_rank:.1f}%)")
+print("  时序进化特征计算完成")
+
+
+# ============================================================
+# 4b. 品类交叉匹配特征 (Category Cross-Match) — 假设检验方向二
+# ============================================================
+# 匹配 inviter 当前分享的 item 品类 与 voter 的品类偏好
+# 三个特征: cate_match_score, item_cate_in_voter_top3,
+#           inviter_voter_cate_overlap
+# 所有聚合仅使用 train_raw (≤split_date)
+# ============================================================
+print("\n" + "=" * 60)
+print("4b. 品类交叉匹配特征 (Category Cross-Match)")
+print("=" * 60)
+
+# cate_match_score: 每个 voter 对每个品类的 share_in 占比
+voter_cate_raw = train_raw[["voter_id", "item_id"]].merge(
+    train_raw[["item_id", "cate_level1_id"]].drop_duplicates("item_id"),
+    on="item_id", how="left")
+voter_cate_count = voter_cate_raw.groupby(["voter_id", "cate_level1_id"]).size().reset_index(name="cate_in_count")
+voter_total_in = voter_cate_count.groupby("voter_id")["cate_in_count"].sum().reset_index(name="total_in")
+voter_cate_count = voter_cate_count.merge(voter_total_in, on="voter_id")
+voter_cate_count["cate_match_score"] = voter_cate_count["cate_in_count"] / voter_cate_count["total_in"]
+
+for df_name, df_lbl in [("train", train_labeled), ("valid", valid_labeled)]:
+    df_lbl = df_lbl.merge(
+        voter_cate_count[["voter_id", "cate_level1_id", "cate_match_score"]],
+        left_on=["voter_id", "cate_level1_id"], right_on=["voter_id", "cate_level1_id"],
+        how="left")
+    df_lbl["cate_match_score"] = df_lbl["cate_match_score"].fillna(0.0)
+    if df_name == "train":
+        train_labeled = df_lbl
+    else:
+        valid_labeled = df_lbl
+
+# item_cate_in_voter_top3: 每个 voter 的 top3 品类
+voter_cate_count["cate_rank"] = voter_cate_count.groupby("voter_id")["cate_in_count"].rank(
+    ascending=False, method="dense")
+voter_top3 = voter_cate_count[voter_cate_count["cate_rank"] <= 3][
+    ["voter_id", "cate_level1_id"]].copy()
+voter_top3["item_cate_in_voter_top3"] = 1
+
+for df_name, df_lbl in [("train", train_labeled), ("valid", valid_labeled)]:
+    df_lbl = df_lbl.merge(
+        voter_top3,
+        left_on=["voter_id", "cate_level1_id"], right_on=["voter_id", "cate_level1_id"],
+        how="left")
+    df_lbl["item_cate_in_voter_top3"] = df_lbl["item_cate_in_voter_top3"].fillna(0).astype(int)
+    if df_name == "train":
+        train_labeled = df_lbl
+    else:
+        valid_labeled = df_lbl
+
+# inviter_voter_cate_overlap: 两人品类兴趣的 Jaccard (唯一配对策略)
+inviter_cate_sets = train_raw.groupby("inviter_id")["cate_level1_id"].apply(set).to_dict()
+voter_cate_sets = train_raw.groupby("voter_id")["cate_level1_id"].apply(set).to_dict()
+
+unique_pairs_cate = train_labeled[["inviter_id", "voter_id"]].drop_duplicates()
+overlap_vals = []
+for _, row in unique_pairs_cate.iterrows():
+    a, b = row["inviter_id"], row["voter_id"]
+    sa, sb = inviter_cate_sets.get(a, set()), voter_cate_sets.get(b, set())
+    intersection = len(sa & sb)
+    union = len(sa | sb)
+    overlap_vals.append(intersection / union if union > 0 else 0.0)
+
+cate_overlap_df = pd.DataFrame({
+    "inviter_id": unique_pairs_cate["inviter_id"].values,
+    "voter_id": unique_pairs_cate["voter_id"].values,
+    "inviter_voter_cate_overlap": overlap_vals,
+})
+
+for df_name, df_lbl in [("train", train_labeled), ("valid", valid_labeled)]:
+    if "inviter_voter_cate_overlap" in df_lbl.columns:
+        df_lbl.drop(columns=["inviter_voter_cate_overlap"], inplace=True)
+    df_lbl = df_lbl.merge(cate_overlap_df, on=["inviter_id", "voter_id"], how="left")
+    df_lbl["inviter_voter_cate_overlap"] = df_lbl["inviter_voter_cate_overlap"].fillna(0.0)
+    if df_name == "train":
+        train_labeled = df_lbl
+    else:
+        valid_labeled = df_lbl
+
+print(f"  cate_match_score: mean={train_labeled['cate_match_score'].mean():.4f}, "
+      f">0占比={(train_labeled['cate_match_score']>0).mean()*100:.1f}%")
+print(f"  item_cate_in_voter_top3: mean={train_labeled['item_cate_in_voter_top3'].mean():.4f}")
+print(f"  inviter_voter_cate_overlap: mean={train_labeled['inviter_voter_cate_overlap'].mean():.4f}")
+print("  品类交叉匹配特征计算完成")
+
+
 # ═══════════════════════════════════════════════════════════
 # 5. 缺失值处理 (Missing Value Handling)
 # ═══════════════════════════════════════════════════════════
@@ -501,6 +670,20 @@ for df_lbl in [train_labeled, valid_labeled]:
     # 传播力/拓扑特征缺失
     for col in ["cate_virality_score", "common_neighbors", "jaccard",
                 "adamic_adar", "pref_attachment"]:
+        if col in df_lbl.columns:
+            df_lbl[col] = df_lbl[col].fillna(0.0)
+
+    # 新特征: 时序进化 (sentinel: pair_last_share_rank 填 -1, 其余填 0)
+    for col in ["inviter_new_voter_ratio", "inviter_voter_retention",
+                "pair_is_recent"]:
+        if col in df_lbl.columns:
+            df_lbl[col] = df_lbl[col].fillna(0)
+    if "pair_last_share_rank" in df_lbl.columns:
+        df_lbl["pair_last_share_rank"] = df_lbl["pair_last_share_rank"].fillna(-1)
+
+    # 新特征: 品类交叉匹配 (全填 0)
+    for col in ["cate_match_score", "item_cate_in_voter_top3",
+                "inviter_voter_cate_overlap"]:
         if col in df_lbl.columns:
             df_lbl[col] = df_lbl[col].fillna(0.0)
 
@@ -547,11 +730,41 @@ cat_cols = sorted([c for c in feature_cols if c in {
 num_cols = [c for c in feature_cols if c not in cat_cols]
 
 # 保存特征配置 (后续建模脚本直接读取)
+# feature_cols: 保留原有119维不变, 确保 lgb_baseline.py A/B/C 不受影响
+# feature_cols_all: 含新特征的完整126维
+# feature_groups: 按实验设计分组, 供 lgb_baseline_D.py 按组选取
+EDGE_FRIEND_COLS = [
+    "is_friend", "share_count_a2b", "share_count_b2a",
+    "total_interactions", "last_share_days", "response_rate",
+]
+GROUP_TEMPORAL = [
+    "inviter_new_voter_ratio", "inviter_voter_retention",
+    "pair_is_recent", "pair_last_share_rank",
+]
+GROUP_CATEGORY = [
+    "cate_match_score", "item_cate_in_voter_top3",
+    "inviter_voter_cate_overlap",
+]
+feature_cols_all = list(feature_cols)  # 完整126维 (含新特征)
+# GROUP_BASE 必须排除边级特征和新特征, 保证严格 = 原113维
+GROUP_BASE = [c for c in feature_cols
+              if c not in EDGE_FRIEND_COLS
+              and c not in GROUP_TEMPORAL
+              and c not in GROUP_CATEGORY]  # 113维
+GROUP_EDGE = EDGE_FRIEND_COLS  # 6维
+
 pd.to_pickle({
-    "feature_cols": feature_cols,
-    "cat_cols": cat_cols,
-    "num_cols": num_cols,
+    "feature_cols": feature_cols,           # 119维 (原有, 保证A/B/C兼容)
+    "feature_cols_all": feature_cols_all,   # 126维 (含新特征)
+    "cat_cols": cat_cols,                   # 14个分类特征
+    "num_cols": num_cols,                   # 数值特征
     "id_cols": id_cols,
+    "feature_groups": {                     # 特征分组 (供D模型按组选取)
+        "GROUP_BASE": GROUP_BASE,           # 113维 基础特征
+        "GROUP_EDGE": GROUP_EDGE,           #   6维 边级朋友圈
+        "GROUP_TEMPORAL": GROUP_TEMPORAL,   #   4维 时序进化
+        "GROUP_CATEGORY": GROUP_CATEGORY,   #   3维 品类交叉
+    },
 }, PROCESSED_DIR / "feature_config.pkl")
 
 # 保存训练/验证矩阵
@@ -565,7 +778,8 @@ df_final_test[["inviter_id", "item_id", "timestamp"]].to_pickle(PROCESSED_DIR / 
 print(f"  train_lgb:     {len(train_labeled):,} × {len(train_labeled.columns)} cols")
 print(f"  valid_lgb:     {len(valid_labeled):,} × {len(valid_labeled.columns)} cols")
 print(f"  test_queries:  {len(df_final_test):,} 查询")
-print(f"  features:      {len(feature_cols)}  ({len(cat_cols)} cat + {len(num_cols)} num)")
+print(f"  features: {len(feature_cols)} 原特征 + {len(GROUP_TEMPORAL) + len(GROUP_CATEGORY)} 新 = {len(feature_cols_all)} 总")
+print(f"  groups: BASE={len(GROUP_BASE)} EDGE={len(GROUP_EDGE)} TEMPORAL={len(GROUP_TEMPORAL)} CATEGORY={len(GROUP_CATEGORY)}")
 print("\n" + "=" * 60)
 print("完成! 下一步: 导入 LightGBM, 读取 train_lgb.pkl 开始训练")
 print("=" * 60)

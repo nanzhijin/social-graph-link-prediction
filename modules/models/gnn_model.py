@@ -19,7 +19,9 @@ from torch_geometric.data import Data
 import warnings
 warnings.filterwarnings("ignore")
 
-PROCESSED_DIR = Path(r"D:\GNN\processed")
+import os as _os_module
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # modules/models/ → GNN/
+PROCESSED_DIR = _PROJECT_ROOT / "processed"
 
 ITEM_CAT_COLS = ["cate_id", "brand_id", "shop_id"]
 ITEM_NUM_COLS = ["cate_virality_score"]
@@ -514,6 +516,80 @@ class GNNModel:
         hits = float(np.mean(ranks <= 5))
         print(f"  [MRR] MRR@5={mrr:.5f}  HITS@5={hits:.5f}")
         return {"mrr@5": mrr, "hits@5": hits}
+
+    def save(self, path):
+        """保存完整模型到单文件，load 后可直接 predict"""
+        state = {
+            "_type": "GNNModel",
+            "encoder": self._encoder.state_dict(),
+            "predictor": self._predictor.state_dict(),
+            "node_to_idx": self._node_to_idx,
+            "data": self._data,
+            "config": {
+                "name": self.name, "hidden_dim": self.hidden_dim,
+                "num_layers": self.num_layers, "gnn_type": self.gnn_type,
+                "use_item_features": self.use_item_features, "item_dim": self.item_dim,
+                "node_feature_dim": self.node_feature_dim,
+            },
+        }
+        if self._has_item_features:
+            state["item_encoder"] = self._item_encoder.state_dict()
+            state["item_cat_maps"] = self._item_cat_maps
+            state["item_vocab_sizes"] = self._item_vocab_sizes
+            state["item_cat_cols"] = self._item_cat_cols
+            state["item_num_cols"] = self._item_num_cols
+        torch.save(state, path)
+        print(f"  [{self.name}] 已保存到 {path}")
+
+    @staticmethod
+    def load(path, device="cpu"):
+        """从文件加载模型，直接可 predict"""
+        state = torch.load(path, map_location=device, weights_only=False)
+        _type = state.get("_type", "GNNModel")
+        if _type == "GNNModelB":
+            from modules.models.gnn_model_B import GNNModelB
+            return GNNModelB._load_state(state, device)
+        return GNNModel._load_state(state, device)
+
+    @classmethod
+    def _load_state(cls, state, device="cpu"):
+        cfg = state["config"]
+        model = cls(**cfg, device=device)
+        model._node_to_idx = state["node_to_idx"]
+        model._data = state["data"]
+        model._n_nodes = len(model._node_to_idx)
+        model._idx_to_node = {i: u for u, i in model._node_to_idx.items()}
+
+        # 重建 encoder
+        in_dim = state["data"].x.shape[1]
+        model._encoder = GNNEncoder(in_dim, model.hidden_dim, model.hidden_dim,
+                                     model.num_layers, model.gnn_type).to(device)
+        model._encoder.load_state_dict(state["encoder"])
+
+        # 重建 predictor
+        item_dim = model.item_dim if model.use_item_features else 0
+        model._predictor = LinkPredictor(model.hidden_dim, item_dim,
+                                          model.hidden_dim).to(device)
+        model._predictor.load_state_dict(state["predictor"])
+
+        # 重建 item encoder
+        if model.use_item_features and "item_encoder" in state:
+            model._item_cat_maps = state["item_cat_maps"]
+            model._item_vocab_sizes = state["item_vocab_sizes"]
+            model._item_cat_cols = state["item_cat_cols"]
+            model._item_num_cols = state["item_num_cols"]
+            model._has_item_features = len(model._item_cat_cols) > 0
+            model._item_encoder = ItemEncoder(
+                model._item_vocab_sizes, embed_dim=8, out_dim=model.item_dim
+            ).to(device)
+            model._item_encoder.load_state_dict(state["item_encoder"])
+
+        model._encoder.eval()
+        model._predictor.eval()
+        if model._has_item_features:
+            model._item_encoder.eval()
+        print(f"  [{model.name}] 模型加载成功")
+        return model
 
     @property
     def node_embeddings(self):

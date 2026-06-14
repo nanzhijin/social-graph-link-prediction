@@ -8,30 +8,69 @@ CAAI-BDSC2023 竞赛 Task 2：基于历史分享行为数据，预测未来时�
 
 | 路线 | 方法 | 核心思路 |
 |------|------|---------|
-| 路线一 | LightGBM | 119维特征（用户画像/图拓扑/边特征/品类交叉），梯度提升树分类 |
-| 路线二 | GNN (GraphSAGE) + DySAT | 对社交图直接建模，GraphSAGE学习节点嵌入，DySAT引入时序注意力 |
+| 路线一 | LightGBM (A→E 五版本) | 113→120 维特征，消融实验 + 假设检验 |
+| 路线二 | GNN GraphSAGE (A/B) | 图结构推理，B 版迁移 LGB-E 新特征到图中 |
+
+### 特征组定义 (2026-06-14 新增)
+
+```
+GROUP_BASE      (113): 52×2 画像 + 5 商品 + 4 拓扑
+GROUP_EDGE      (  6): is_friend, share_count_a2b/b2a, total_interactions,
+                        last_share_days, response_rate
+GROUP_TEMPORAL  (  4): inviter_new_voter_ratio, inviter_voter_retention,
+                        pair_is_recent, pair_last_share_rank
+GROUP_CATEGORY  (  3): cate_match_score, item_cate_in_voter_top3,
+                        inviter_voter_cate_overlap
+```
 
 ## 关键结果
 
-| 模型 | Valid AUC | MRR@5 | HITS@5 | 说明 |
-|------|-----------|-------|--------|------|
-| 官方基线 | — | 0.0344 | 0.0926 | 竞赛官方 baseline |
-| **LGB-A** (113维) | **0.8957** | **0.5606** | 0.6045 | **主力模型**，不含朋友圈特征 |
-| LGB-B (119维) | 0.8606 | 0.4291 | 0.7275 | 边特征反而降低 AUC |
-| LGB-C (118维) | 0.8555 | 0.4560 | 0.6930 | 单独删 is_friend |
-| GNN (无item) | 0.9604 | 0.2137 | 0.3600 | 纯图结构 |
-| **GNN + Item** | **0.9847** | **0.3273** | 0.5415 | +53% MRR vs 无item |
-| DySAT (无item) | 0.9567 | 0.2219 | 0.3700 | +3.8% vs GNN |
-| DySAT + Item | 0.9790 | 0.3111 | 0.5245 | -5.0% vs GNN+item |
+### LightGBM 全系列 (统一评估: N_QUERIES=500, 候选池=训练期朋友+随机)
 
-**MRR 分场景拆解：**
+| 模型 | 特征组 | Dim | AUC | MRR@5 | HITS@5 | 说明 |
+|------|--------|-----|-----|-------|--------|------|
+| 官方基线 | — | — | — | 0.0344 | 0.0926 | 竞赛官方 baseline |
+| **LGB-A** | BASE | 113 | **0.8957** | **0.5523** | 0.6100 | 对照组，行为统计 |
+| LGB-B | BASE+EDGE | 119 | 0.8606 | 0.4291 | 0.7275 | 边特征反降 AUC |
+| LGB-C | BASE+EDGE-is_friend | 118 | 0.8555 | 0.4560 | 0.6930 | 删硬标签 |
+| LGB-D | BASE+TEMP+CAT | 120 | 0.9479 | 0.3650 | 0.5680 | ⚠️ rank 注水AUC |
+| **LGB-E** ★ | BASE+TEMP[-rank]+CAT | 119 | 0.8840 | 0.4482 | **0.7600** | 去 rank 后真实版 |
 
-| 场景 | 占比 | LGB-A MRR | GNN+Item MRR | 诊断 |
-|------|------|-----------|-------------|------|
-| 场景1：好友召回 | 72.4% | **0.74** | 0.25 | LGB 的 is_friend 一招制胜 |
-| 场景2：冷启动 | 27.6% | 0.09 | **0.54** | GNN 图嵌入碾压 LGB |
+### GNN 全系列 (统一评估: N_QUERIES=500, 仅正样本)
 
-LGB 在好友推荐上靠边特征一招制胜；GNN 在冷启动场景通过图嵌入碾压 LGB。**两者互补。**
+| 模型 | 架构 | AUC | MRR@5 | HITS@5 | 说明 |
+|------|------|-----|-------|--------|------|
+| GNN (无item) | SAGE | 0.9604 | 0.2137 | 0.3600 | 纯图结构 |
+| DySAT (无item) | DySAT | 0.9567 | 0.2219 | 0.3700 | 时序注意力 |
+| DySAT + Item | DySAT + ItemEncoder | 0.9790 | 0.3111 | 0.5245 | 时序信号弱，-5% vs GNN+Item |
+| **GNN-A** | SAGE + ItemEncoder | 0.9853 | **0.3517** | 0.5480 | 原版 GNN 基线 |
+| **GNN-B** ★ | SAGE + ItemEncoder + Extra(6d) | **0.9889** | **0.3824** | **0.6100** | 迁移 LGB-E 6 特征 (时序×3 + 品类×3) |
+
+### MRR@5 分场景拆解 (全模型对比)
+
+| 场景 | 占比 | LGB-A | LGB-E | GNN-A | GNN-B | 最优 |
+|------|------|:-----:|:-----:|:-----:|:-----:|:----:|
+| 全局 | 100% | **0.55** | 0.45 | 0.35 | 0.38 | LGB-A |
+| 朋友组 (Seen) | 74.6% | **0.74** | 0.52 | 0.28 | 0.34 | LGB-A |
+| 陌生人组 (Unseen) | 25.4% | 0.00 | 0.23 | **0.56** | 0.52 | **GNN-A** |
+
+**核心洞察 (2026-06-14 更新):**
+
+- **GNN-A 陌生人 MRR 0.56** 碾压所有模型（LGB-A 0.00 / LGB-E 0.23 / GNN-B 0.52），HITS@5 0.65 意味着 **65% 的陌生人能被排进前 5**
+- LGB-A 朋友 MRR 0.74 是单场景最高记录，is_friend 一招制胜
+- **GNN-B 全局 MRR 0.38 (+8.7%)，但提升全部集中在朋友侧 (+20%)，陌生人反而 −7.8%**
+- 最优组合不变: **朋友用 LGB-A + 陌生人用 GNN-A → 理论 MRR ≈ 0.69**
+- GNN-B 验证了"标量拼 MLP"无法突破陌生人瓶颈，正确的增量方向是边权重消息传递（5/20 设计，尚未实现）
+
+### 优化历史
+
+| 日期 | 实验 | 结论 |
+|------|------|------|
+| 2026-05 | LGB A/B/C 消融 | 朋友圈特征 (is_friend) 是过滤器非排序器 |
+| 2026-06-14 | LGB-D (时序+品类, 含rank) | AUC +0.05 但 MRR 崩塌，rank 在负采样中注水 |
+| 2026-06-14 | LGB-E (去 rank) | 陌生人 MRR 0→0.23，HITS 0→0.57，但全局 MRR 未超 A |
+| 2026-06-14 | GNN-B (6特征迁移) 云部署 | 全局 MRR 0.38 (+8.7%)，朋友 +20%，陌生人 −7.8% |
+| 2026-06-14 | MRR 评估修复 | 发现并修复 label 不过滤负样本导致 MRR 被拖死 10 倍的 bug |
 
 ---
 
@@ -294,11 +333,226 @@ FeatureSelector          Model (任一)
 
 ## 核心发现
 
-1. **AUC ≠ MRR**：GNN 的 AUC 极高（0.98）但 MRR 低（0.33）。图结构擅长分类不擅长排序。损失函数（BCE）和共享 item embedding 导致 GNN 无法学习候选人的相对排序。
-2. **边特征是双刃剑**：is_friend 在场景1 MRR=0.74（决定性），但对 AUC 是负贡献——正负样本各25%都有 is_friend=1，分类面被污染。
-3. **缺失 per-(voter, item) 交互特征**：119维里没有一个特征回答"这个候选人是否适合这个具体商品"。单特征规则（voter 是否接收过该品类）就能达到 MRR=0.18。
-4. **DySAT 时序信号极弱**：快照间距仅38天，71%用户度数无变化，Temporal Attention 基本是负优化。
-5. **GNN ItemEncoder 是关键**：加入商品特征后 GNN MRR 从 0.21→0.33 (+53%)，证明 item-aware 预测对排序至关重要。
+1. **AUC ≠ MRR**：GNN AUC 0.98+ 但 MRR 0.35。图结构擅长分类不擅长排序。BCE loss 优化链接存在性，不优化候选人相对排序。
+2. **LGB + GNN 场景互补**：LGB-A 对老朋友一招制胜（MRR 0.74），GNN-A 对陌生人冷启动碾压（MRR 0.56, HITS 65%）。双模型组合理论可达 MRR 0.69。
+3. **标量拼 MLP 对陌生人无效**：GNN-B 的 6 特征（时序+品类）只帮了朋友（+20%），陌生人反而退步（−8%）。extra 占 166 维的 3.6% 被 embedding 淹没。
+4. **边权重消息传递是正确方向**：朋友圈信号应该作为 SAGEConv 的 edge_weight 做加权传播（5/20 设计），而非拼进分类器。该方案至今未实现。
+5. **DySAT 时序信号极弱**：快照间距仅38天，71%用户度数无变化，Temporal Attention 基本负优化。
+6. **MRR 评估必须过滤负样本**：valid_lgb 75% 为负样，不过滤会导致 MRR 被拖死 10 倍（0.08 vs 0.35）。
+
+---
+
+## 模型部署 (NaNaGi 可调用)
+
+### 模型文件
+
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| `3_算法建模/gnn_a.pt` | 49MB | GNN-A 完整模型 (陌生人专家, MRR 0.56) |
+| `3_算法建模/gnn_b.pt` | 49MB | GNN-B 完整模型 (全局门卫, AUC 0.989) |
+| `3_算法建模/lgb_baseline_A.pkl` | ~2MB | LGB-A 完整模型 (朋友专家, MRR 0.74) |
+
+### 调用方式
+
+**GNN 模型：**
+```python
+from modules.models.gnn_model import GNNModel
+model = GNNModel.load("3_算法建模/gnn_a.pt")
+scores = model.predict_proba(df)  # 需要 inviter_id, voter_id, cate_id, brand_id, shop_id, cate_virality_score
+```
+
+**LGB 模型：**
+```python
+import joblib
+model = joblib.load("3_算法建模/lgb_baseline_A.pkl")
+# 用模型自带的特征名取列 + 时间列转数字 + 分类列标 category
+scores = model.predict_proba(X)[:, 1]
+```
+
+### 三模型联合预测验证 (10条随机抽样)
+
+```
+label  LGB-A   GNN-A   GNN-B
+  0    0.0000  0.0000  0.0000
+  0    0.0000  0.0000  0.0000
+  0    0.0000  0.0002  0.0000
+  1    0.0000  1.0000  1.0000   ← GNN双命中，LGB-A 漏了
+  0    0.0000  0.0467  0.0014
+  0    0.0000  0.0000  0.0000
+  0    0.0000  0.0800  0.0002
+  1    0.9999  0.9986  0.9593   ← 三模型全命中
+  0    0.0000  0.0210  0.0005
+  0    0.0000  0.0000  0.0000
+```
+
+**关键发现：**
+- 第4行：GNN-A/GNN-B 双命中正样本，LGB-A 漏了 → **GNN 对陌生人冷启动的互补价值**
+- 第8行：三模型全命中，高置信度一致 → 朋友场景三模型协同
+- GNN-B 对负样本压制最狠（均值 0.0003 vs GNN-A 0.0148 vs LGB-A 0.0000）→ **GNN-B 的粗筛/门卫价值**
+- LGB-A 对负样本同样压得接近零 → 适合朋友入口的精排
+
+---
+
+## 上线娜娜吉注意事项
+
+### 数据预处理（必读）
+
+LGB-A 模型调用前必须做三步预处理——
+
+**LGB-A 推理包装函数：**
+```python
+import joblib, pandas as pd, numpy as np
+
+def predict_lgb_a(df, model_path="3_算法建模/lgb_baseline_A.pkl"):
+    model = joblib.load(model_path)
+    
+    # 1. 只用模型训练时的特征列
+    X = df[model.feature_name_].copy()
+    
+    # 2. 时间列转 ordinal 数字
+    for c in X.columns:
+        if 'first_time' in c or 'last_time' in c:
+            vals = []
+            for v in X[c]:
+                if pd.isna(v) or v == -1 or v == '-1' or v == 0:
+                    vals.append(-1.0)
+                else:
+                    try: vals.append(float(pd.Timestamp(v).toordinal()))
+                    except: vals.append(-1.0)
+            X[c] = np.array(vals, dtype=np.float64)
+    
+    # 3. 分类列标 category，数值列填 0
+    cat_feat = model.get_params().get('categorical_feature', [])
+    for col in X.columns:
+        if col in cat_feat:
+            X[col] = X[col].fillna(-1).astype(int).astype('category')
+        else:
+            X[col] = X[col].fillna(0).astype(np.float64)
+    
+    return model.predict_proba(X)[:, 1]
+```
+
+**GNN 推理包装函数：**
+```python
+from modules.models.gnn_model import GNNModel
+
+def predict_gnn(df, model_path):
+    model = GNNModel.load(model_path)
+    cols = ['inviter_id', 'voter_id', 'cate_id', 'brand_id', 'shop_id', 'cate_virality_score']
+    return model.predict_proba(df[cols])
+```
+
+### 三模型分工（生产环境调用顺序）
+
+```
+1. GNN-B 先验过滤: p_link < θ → 直接丢弃（省算力）
+2. 业务路由:
+   - 朋友入口 → LGB-A 精排
+   - 陌生人入口 → GNN-A 精排
+```
+
+### 已知坑
+
+| 坑 | 影响 | 解决 |
+|---|---|---|
+| LGB categorical dtype 不匹配 | sklearn wrapper 报错 | 用 `model.feature_name_` + category dtype |
+| 时间列为 datetime/object | LGB 不吃非数值型 | `toordinal()` 转换 |
+| 特征列数与训练不一致 | 数据重跑后列数可能变 | 永远用 `model.feature_name_`，不自己推断 |
+| GNN 需要 item 特征列 | predict 时缺列会报错 | 必须传入 `cate_id, brand_id, shop_id, cate_virality_score` |
+
+---
+
+## 上线路线图 (NaNaGi 落地)
+
+### 分业务场景路由架构
+
+产品层两个入口天然分流，不需要额外学路由器：
+
+```
+朋友推荐入口                        陌生人探索入口
+candidates = 2-hop + 同校/同司       candidates = 兴趣/活动/跨社群
+    ↓                                      ↓
+  LGB-A 精排                            GNN-A 精排
+  (朋友 MRR 0.74)                       (陌生人 MRR 0.56)
+    ↓                                      ↓
+          ┌──────────────────────────────┐
+          │    GNN-B Prior Filter (共享)  │
+          │    全局 p_link 截断/校准      │
+          └──────────────────────────────┘
+```
+
+### GNN-B = 全局先验过滤器（Prior Filter）
+
+GNN-B 的 AUC 0.989 不参与精排竞争，下沉为两路线共享的门卫：
+
+```
+全量候选 → GNN-B p_link(u,v) → 扔掉 p_link < θ 的 → 精排模型处理 → Top-5
+```
+
+| 角色 | 负责模型 | 核心指标 |
+|------|:--------:|:--------:|
+| 朋友精排 | LGB-A | 朋友 MRR 0.74, HITS@5 0.89 |
+| 陌生人精排 | GNN-A | 陌生人 MRR 0.56, HITS@5 0.65 |
+| 全局粗筛/门卫 | GNN-B | AUC 0.989, 全局 MRR 0.38 |
+
+### 审计清单 (来自外部评审)
+
+#### ✅ 已做对
+
+| 维度 | 说明 |
+|------|------|
+| 时间切分 | split_date=2022-10-29，训练图不含验证边 → random-edge-removal 会虚高 10-30 点 |
+| candidate 协议 | friends + 200 random + label==1 过滤 → 比 global random-pair AUC 更贴近真实 |
+| 分场景建模 | 朋友/陌生人分开评估 → 两套生成机制天生不同，统一模型反而不如分工 |
+| 基线 ablations | GNN 无item (0.96 AUC)、LGB-A 无图特征 (0.896) → 图结构增量可度量 |
+| 负样本过滤 | candidate 含训练期朋友占位 → 陌生人要在朋友抢前排的条件下排序，难度设定诚实 |
+
+#### ⚠️ 需要补充
+
+| 事项 | 优先级 | 说明 |
+|------|:------:|------|
+| 补 Common Neighbors / Adamic-Adar baseline | 🔴 P0 | 纯拓扑启发式在同一 split 上跑 AUC → 如果 >0.92，0.989 就是拓扑天花板不是泄漏；写进论文/报告主动"解魅" |
+| 明确 HITS@k 的 k 值 | 🟡 P1 | 目前所有 HITS 都是 @5，报告里写 "HITS: 0.89" 应写成 "HITS@5: 0.89" |
+| 评估协议文档化 | 🟡 P1 | 时间切分方式、候选池 size、负采样协议、filtered evaluation → 论文 Methodology 一节 |
+| GNN-B 截断阈值 θ 设定 | 🟡 P1 | 一个人平均多少 candidate → p_link Top-K 截到多少 → 精排算力节省多少 |
+| 陌生人 MRR 需要"下一个动作"叙事 | 🟢 P2 | 0.35→0.56 是图结构能做的极限，接下来靠 temporal interaction / 跨社群共现 / 品类偏好独立通路上分 |
+| LGB-E 朋友 HITS 补测 | 🟢 P2 | mrr_breakdown.py 有 rank 分布数据，补跑一次即可 |
+
+#### 🔴 AUC 0.989 的防御性叙事
+
+社交网络结构天花板效应 → 不是泄漏，是诚实的时间切分 + 高聚类系数图的自然结果：
+
+- 训练期 ≥3 个共同好友 → 未来连边概率指数级高于随机
+- 纯图结构（零特征）GNN 就已 AUC 0.96
+- 时间切分 ≠ random edge removal，后者会虚高 10-30 点
+- AUC 在你的数据上区分度低（0.96→0.989 只差 0.029）→ **不要当核心贡献指标，MRR/HITS@5 才是**
+
+论文/报告里建议主动放这样一张表：
+
+```
+Method                         AUC     MRR@5   HITS@5
+Common Neighbors (纯拓扑)      ~0.93     —        —
+LGB-A (无图特征)               0.896    0.55     0.61
+LGB-A (朋友专家)                 —      0.74     0.89
+GNN-A (陌生人专家)             0.985    0.35     0.65
+GNN-B (全局门卫)               0.989    0.38     0.61
+```
+
+主动摆出来 = 你在驾驭指标，不是被 AUC 绑架。
+
+#### 论文级核心论点（一句）
+
+> Friend-link formation is dominated by local triadic closure efficiently captured by feature-engineered gradient boosting, while stranger-link formation requires multi-hop relational diffusion that benefits from GNN message passing — therefore a router-based hybrid outperforms any single homogeneous model.
+
+### NaNaGi 落地待办
+
+- [ ] P0: 补 CN/AA 拓扑 baseline 跑 AUC
+- [ ] P0: 确定 GNN-B prior filter 的截断阈值 θ
+- [ ] P1: 两个入口的 candidate pool 构建规则精确文档化（5-6 条规则/数据源清单）
+- [ ] P1: 评估协议完整文档（split/负采样/HITS@k/filtered eval）
+- [ ] P2: 边权重消息传递 GNN-B 实现（5/20 原案）
+- [ ] P2: 品类偏好独立通路（不与 MLP 拼接，直接加权候选池）
+- [ ] P3: GNN-B embedding → ANN 检索召回（替代随机 200 候选）
 
 ## 技术栈
 

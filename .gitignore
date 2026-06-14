@@ -15,4 +15,10 @@ figures/_test*.png
 
 # 个人文档
 0_方案设计/*面试*.md
+0_方案设计/*面试*.docx
 0_方案设计/SQL*.md
+0_方案设计/_resume*
+0_方案设计/resume_*
+
+# 云部署打包文件
+*.tar
